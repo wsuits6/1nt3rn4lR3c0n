@@ -1,81 +1,107 @@
-
-
-
 @echo off
-setlocal EnableDelayedExpansion
+setlocal EnableExtensions EnableDelayedExpansion
 
-:: Auto-detect USB drive labeled "Hsociety"
-for /f "tokens=1,2*" %%a in ('wmic logicaldisk get name^,VolumeName ^| findstr Hsociety') do (
-    set "usbDrive=%%a"
+:: ===============================
+
+:: ██╗    ██╗███████╗██╗   ██╗██╗████████╗███████╗ ██████╗ 
+:: ██║    ██║██╔════╝██║   ██║██║╚══██╔══╝██╔════╝██╔════╝ 
+:: ██║ █╗ ██║███████╗██║   ██║██║   ██║   ███████╗███████╗ 
+:: ██║███╗██║╚════██║██║   ██║██║   ██║   ╚════██║██╔═══██╗
+:: ╚███╔███╔╝███████║╚██████╔╝██║   ██║   ███████║╚██████╔╝
+::  ╚══╝╚══╝ ╚══════╝ ╚═════╝ ╚═╝   ╚═╝   ╚══════╝ ╚═════╝ 
+                                                           
+::                                                          
+:: ===============================
+:: InternRecon v1.1
+:: Wsuits6 Internal Recon Tool
+:: ===============================
+
+:: ---- CONFIG ----
+set "USB_LABEL=Hsociety"
+set "BASE_DIR=Recon"
+
+:: ---- Detect USB drive by label ----
+for /f "skip=1 tokens=1,2" %%A in ('wmic logicaldisk get Name^,VolumeName') do (
+    if /I "%%B"=="%USB_LABEL%" set "USB_DRIVE=%%A"
 )
 
-:: Check if drive was found
-if not defined usbDrive (
-    echo [!] USB drive with label Hsociety not found.
+if not defined USB_DRIVE (
+    echo [!] USB drive with label "%USB_LABEL%" not found.
+    echo [!] Insert the drive and try again.
     pause
-    exit /b
+    exit /b 1
 )
 
-:: Create folder structure
-set "today=%date:/=-%"
-set "outputDir=%usbDrive%\Recon\%today%"
-mkdir "%outputDir%" >nul 2>&1
+:: ---- Date (locale-safe) ----
+for /f %%i in ('wmic os get localdatetime ^| find "."') do set dt=%%i
+set "TODAY=%dt:~0,4%-%dt:~4,2%-%dt:~6,2%"
 
-:: Recon files
-set "ipfile=%outputDir%\ipconfig.txt"
-set "arpfile=%outputDir%\arp.txt"
-set "netstatfile=%outputDir%\netstat.txt"
-set "userfile=%outputDir%\local_users.txt"
-set "groupfile=%outputDir%\local_groups.txt"
-set "adminGroup=%outputDir%\local_admin_group.txt"
-set "hostscan=%outputDir%\host_discovery.txt"
-set "hostnames=%outputDir%\netbios_names.txt"
-set "shares=%outputDir%\network_shares.txt"
-set "routes=%outputDir%\routes.txt"
-set "firewall=%outputDir%\firewall_rules.txt"
-set "adminhunt=%outputDir%\admin_candidates.txt"
+set "OUTPUT_DIR=%USB_DRIVE%\%BASE_DIR%\%TODAY%"
+mkdir "%OUTPUT_DIR%" >nul 2>&1
 
-echo [+] Starting internal recon...
-ipconfig /all > "%ipfile%"
-arp -a > "%arpfile%"
-netstat -ano > "%netstatfile%"
-net user > "%userfile%"
-net localgroup > "%groupfile%"
-net localgroup administrators > "%adminGroup%"
-route print > "%routes%"
-netsh advfirewall firewall show rule name=all > "%firewall%"
+:: ---- Output files ----
+set "IPCFG=%OUTPUT_DIR%\ipconfig.txt"
+set "ARP=%OUTPUT_DIR%\arp.txt"
+set "NETSTAT=%OUTPUT_DIR%\netstat.txt"
+set "USERS=%OUTPUT_DIR%\local_users.txt"
+set "GROUPS=%OUTPUT_DIR%\local_groups.txt"
+set "ADMINS=%OUTPUT_DIR%\local_admins.txt"
+set "ROUTES=%OUTPUT_DIR%\routes.txt"
+set "FW=%OUTPUT_DIR%\firewall_rules.txt"
+set "HOSTS=%OUTPUT_DIR%\live_hosts.txt"
+set "NBT=%OUTPUT_DIR%\netbios.txt"
+set "SHARES=%OUTPUT_DIR%\shares.txt"
+set "ADMIN_HUNT=%OUTPUT_DIR%\admin_candidates.txt"
 
-:: Ping sweep to find live hosts
-echo [+] Scanning subnet...
-for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr "IPv4"') do (
-    for /f "tokens=1-4 delims=." %%b in ("%%a") do (
-        set "subnet=%%b.%%c.%%d"
+echo [+] Starting InternRecon...
+echo [+] Output directory: %OUTPUT_DIR%
+
+:: ---- Basic system recon ----
+ipconfig /all > "%IPCFG%"
+arp -a > "%ARP%"
+netstat -ano > "%NETSTAT%"
+net user > "%USERS%"
+net localgroup > "%GROUPS%"
+net localgroup administrators > "%ADMINS%"
+route print > "%ROUTES%"
+netsh advfirewall firewall show rule name=all > "%FW%"
+
+:: ---- Determine primary IPv4 ----
+for /f "tokens=2 delims=:" %%A in ('ipconfig ^| findstr /i "IPv4"') do (
+    for /f "tokens=1-4 delims=." %%B in ("%%A") do (
+        set "SUBNET=%%B.%%C.%%D"
+        goto :SUBNET_FOUND
     )
 )
 
-for /l %%i in (1,1,254) do (
-    set "ip=!subnet!.%%i"
-    ping -n 1 -w 1 !ip! | find "Reply" >nul && echo [*] !ip! is alive >> "%hostscan%"
+:SUBNET_FOUND
+if not defined SUBNET (
+    echo [!] Could not determine subnet.
+    goto :END
 )
 
-:: Try to resolve NetBIOS names and list shares
-echo [+] Resolving NetBIOS names and shares...
-for /f %%h in (%hostscan%) do (
-    for /f "tokens=3" %%i in ("%%h") do (
-        set "targetIP=%%i"
-        echo --- %%i --- >> "%hostnames%"
-        nbtstat -A %%i >> "%hostnames%"
-        echo Shares on %%i >> "%shares%"
-        net view \\%%i >> "%shares%" 2>&1
+echo [+] Scanning subnet %SUBNET%.0/24
+
+:: ---- Ping sweep ----
+for /L %%I in (1,1,254) do (
+    ping -n 1 -w 300 %SUBNET%.%%I >nul && (
+        echo %SUBNET%.%%I >> "%HOSTS%"
     )
 )
 
-:: Admin hunt: try to find hosts likely to be admins
-echo [+] Hunting for Admin/IT PCs...
-for /f "tokens=*" %%l in (%hostnames%) do (
-    echo %%l | findstr /i "admin administrator it server dc boss ceo" >> "%adminhunt%"
+:: ---- NetBIOS + Shares ----
+for /f %%H in (%HOSTS%) do (
+    echo ===== %%H ===== >> "%NBT%"
+    nbtstat -A %%H >> "%NBT%" 2>&1
+
+    echo ===== %%H ===== >> "%SHARES%"
+    net view \\%%H >> "%SHARES%" 2>&1
 )
 
-echo [?] Recon complete. Results saved to:
-echo %outputDir%
+:: ---- Admin hunt (heuristic) ----
+findstr /i "admin administrator it server dc ceo boss" "%NBT%" > "%ADMIN_HUNT%"
+
+:END
+echo [+] Recon complete.
+echo [+] Results saved to: %OUTPUT_DIR%
 pause
